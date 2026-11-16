@@ -805,6 +805,12 @@ def _http_auth_exception(path: str, method: str) -> bool:
         or (path == "/api/computers/pairing/enter" and method in {"GET", "POST"})
         # A phone spends a one-use pairing code inside the handler (mobile_routes).
         or (path == "/api/mobile/pair/redeem" and method == "POST")
+        # Telegram's WebView holds no credential; the handler verifies the
+        # signed initData and the owner id before it mints a one-use ticket.
+        or (
+            path in {"/api/telegram/miniapp/session", "/api/telegram/miniapp/handoff"}
+            and method == "POST"
+        )
         or _is_static_request(path, method)
         or (path == "/api/health" and method == "GET")
         or (path == "/api/ui/shell-painted" and method == "POST")

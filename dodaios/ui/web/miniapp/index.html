@@ -1,0 +1,316 @@
+<!doctype html>
+<!-- Telegram Mini App: a live voice call with the assistant. One static page,
+     no build step. It proves ownership with Telegram's signed initData
+     (or a one-use hand-off code in the URL fragment when opened in Safari),
+     gets a single-use ticket from POST /api/telegram/miniapp/session and then
+     speaks the same /ws/audio protocol the desktop browser call uses:
+     raw int16 PCM up, int16 24 kHz PCM down, JSON control frames both ways. -->
+<html lang="uz" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="color-scheme" content="dark light">
+<meta name="google" content="notranslate">
+<title>JARVIS</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --bg:#0b0d12; --fg:#eef1f7; --muted:#8b93a7; --card:#151a24; --accent:#4f8cff;
+          --ok:#34d399; --warn:#fbbf24; --bad:#f87171; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6fa; --fg:#12151c; --muted:#5d667a; --card:#fff; }
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+              font:16px/1.4 -apple-system,system-ui,sans-serif; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom); }
+  header { text-align:center; padding:18px 0 4px; }
+  header h1 { margin:0; font-size:20px; letter-spacing:.12em; }
+  #status { color:var(--muted); font-size:14px; min-height:20px; margin-top:4px; }
+  .stage { display:flex; justify-content:center; padding:18px 0 8px; }
+  #orb { width:132px; height:132px; border-radius:50%; background:var(--card);
+         border:3px solid var(--muted); transition:border-color .2s, transform .15s, box-shadow .2s; }
+  body[data-state="listening"] #orb { border-color:var(--ok); box-shadow:0 0 28px #34d39944; }
+  body[data-state="thinking"] #orb { border-color:var(--warn); animation:pulse 1s infinite ease-in-out; }
+  body[data-state="speaking"] #orb { border-color:var(--accent); box-shadow:0 0 34px #4f8cff55; animation:pulse .6s infinite ease-in-out; }
+  body[data-state="connecting"] #orb { border-color:var(--warn); }
+  body[data-state="error"] #orb { border-color:var(--bad); }
+  body[data-muted="1"] #orb { opacity:.55; }
+  @keyframes pulse { 50% { transform:scale(1.07); } }
+  #log { flex:1; overflow-y:auto; padding:8px 0; display:flex; flex-direction:column; gap:8px; }
+  .msg { max-width:88%; padding:9px 12px; border-radius:14px; background:var(--card); word-wrap:break-word; }
+  .msg.user { align-self:flex-end; background:var(--accent); color:#fff; }
+  .msg.partial { opacity:.6; }
+  #error { display:none; background:#f8717122; border:1px solid var(--bad); color:var(--fg);
+           padding:10px 12px; border-radius:12px; margin:6px 0; font-size:14px; }
+  #error.show { display:block; }
+  .bar { display:flex; gap:10px; padding:10px 0 16px; }
+  button { flex:1; padding:15px 10px; border:0; border-radius:14px; font-size:16px; font-weight:600;
+           background:var(--card); color:var(--fg); }
+  button.primary { background:var(--ok); color:#06210f; }
+  button.danger { background:var(--bad); color:#2a0707; }
+  button:disabled { opacity:.4; }
+  #safari { display:none; background:none; color:var(--muted); font-size:13px; padding:4px; }
+  #safari.show { display:block; }
+</style>
+</head>
+<body data-state="idle" data-muted="0">
+<header>
+  <h1>JARVIS</h1>
+  <div id="status" role="status">Tayyor</div>
+</header>
+<div class="stage"><div id="orb"></div></div>
+<div id="error" role="alert"></div>
+<div id="log" aria-live="polite"></div>
+<button id="safari" type="button">Mikrofon ishlamasa, Safari'da ochish</button>
+<div class="bar">
+  <button id="call" class="primary" type="button">📞 Qo'ng'iroqni boshlash</button>
+  <button id="mute" type="button" disabled>🎙 Ovozni o'chirish</button>
+</div>
+<script>
+"use strict";
+(() => {
+  // User-facing text lives here only.
+  const T = {
+    ready: "Tayyor", connecting: "Ulanmoqda…", listening: "Eshitaman", thinking: "O'ylayapman…",
+    speaking: "Gapiryapman", reconnecting: "Aloqa uzildi, qayta ulanmoqda…", ended: "Qo'ng'iroq tugadi",
+    start: "📞 Qo'ng'iroqni boshlash", end: "⏹ Qo'ng'iroqni tugatish",
+    mute: "🎙 Ovozni o'chirish", unmute: "🔇 Ovozni yoqish",
+    notTelegram: "Bu sahifani Telegram ichida, JARVIS botidagi 📞 tugmasi orqali oching.",
+    noMic: "Bu brauzerda mikrofon mavjud emas. Safari'da ochib ko'ring.",
+    micDenied: "Mikrofonga ruxsat berilmadi. Telefon sozlamalarida Telegram uchun mikrofonni yoqing yoki Safari'da oching.",
+    micFailed: "Mikrofonni ochib bo'lmadi.", audioFailed: "Audio qurilma tayyor bo'lmadi.",
+    rate_limited: "Juda ko'p urinish. Bir necha daqiqadan keyin qayta urining.",
+    not_owner: "Bu qo'ng'iroq faqat JARVIS egasi uchun.",
+    bad_signature: "Telegram imzosi tasdiqlanmadi. Sahifani botdagi tugma orqali qayta oching.",
+    stale: "Sessiya eskirgan. Sahifani botdagi tugma orqali qayta oching.",
+    no_token: "Bot hali ulanmagan (token yo'q).", no_owner: "Bot egasi hali bog'lanmagan. Botga /start yuboring.",
+    session_expired: "Sessiya tugadi. Sahifani qayta oching.", handoff_expired: "Havola eskirgan. Telegram'dan yangisini oling.",
+    busy: "Server band, birozdan keyin urining.", malformed: "Telegram ma'lumoti noto'g'ri.",
+    network: "Serverga ulanib bo'lmadi.", closed: "Ulanish yopildi",
+    gaveUp: "Qayta ulanib bo'lmadi. Qo'ng'iroqni qaytadan boshlang.",
+    you: "Siz", jarvis: "JARVIS",
+  };
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const $ = (id) => document.getElementById(id);
+  const els = { status: $("status"), log: $("log"), error: $("error"), call: $("call"), mute: $("mute"), safari: $("safari") };
+  const HANDOFF = (location.hash.match(/(?:^#|&)h=([\w-]+)/) || [])[1] || "";
+  if (HANDOFF) history.replaceState(null, "", location.pathname);   // keep the code out of history
+  if (tg) { try { tg.ready(); tg.expand(); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (_) {} }
+
+  const S = { active: false, muted: false, state: "idle", sessionToken: "", ws: null, ctx: null, stream: null,
+              node: null, playhead: 0, sources: new Set(), ttsRate: 24000, retries: 0, partial: null,
+              loudRun: 0, ending: false, wake: null, readyTimer: null };
+
+  function setState(state, text) {
+    S.state = state; document.body.dataset.state = state;
+    els.status.textContent = text || T[state] || "";
+  }
+  function showError(msg) { els.error.textContent = msg; els.error.classList.add("show"); }
+  function clearError() { els.error.classList.remove("show"); }
+  function addMessage(role, text, partial) {
+    let el = S.partial && S.partial.role === role ? S.partial.el : null;
+    if (!el) { el = document.createElement("div"); els.log.appendChild(el); }
+    el.className = "msg " + (role === "user" ? "user" : "") + (partial ? " partial" : "");
+    el.textContent = text;
+    S.partial = partial ? { role, el } : null;
+    els.log.scrollTop = els.log.scrollHeight;
+  }
+
+  // ---- authentication: signed initData, a hand-off code or a page session ----
+  async function fetchTicket() {
+    const body = S.sessionToken ? { session_token: S.sessionToken }
+      : HANDOFF && !S.usedHandoff ? { handoff: HANDOFF }
+      : { init_data: (tg && tg.initData) || "" };
+    if (body.handoff) S.usedHandoff = true;
+    if (!body.session_token && !body.handoff && !body.init_data) throw new Error(T.notTelegram);
+    let res;
+    try {
+      res = await fetch("/api/telegram/miniapp/session", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } catch (_) { throw new Error(T.network); }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(T[data.error] || T.network), { fatal: res.status < 500 });
+    S.sessionToken = data.session_token;
+    return data.ticket;
+  }
+
+  // ---- microphone capture (AudioWorklet -> int16 frames) ----
+  const WORKLET = `class Cap extends AudioWorkletProcessor {
+    constructor(){ super(); this.buf=[]; this.n=0; }
+    process(inputs){ const c=inputs[0][0]; if(!c) return true;
+      this.buf.push(new Float32Array(c)); this.n+=c.length;
+      if(this.n>=1600){ const o=new Float32Array(this.n); let p=0;
+        for(const b of this.buf){ o.set(b,p); p+=b.length; }
+        this.port.postMessage(o,[o.buffer]); this.buf=[]; this.n=0; }
+      return true; } }
+    registerProcessor("cap", Cap);`;
+
+  async function openAudio() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error(T.noMic);
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    S.ctx = new Ctx({ latencyHint: "interactive" });
+    if (S.ctx.state === "suspended") await S.ctx.resume();
+    try {
+      S.stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    } catch (e) {
+      throw new Error(e && (e.name === "NotAllowedError" || e.name === "SecurityError") ? T.micDenied : T.micFailed);
+    }
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+    await Promise.race([S.ctx.audioWorklet.addModule(url),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(T.audioFailed)), 10000))]);
+    URL.revokeObjectURL(url);
+    S.node = new AudioWorkletNode(S.ctx, "cap");
+    S.node.port.onmessage = (ev) => onMic(ev.data);
+    const src = S.ctx.createMediaStreamSource(S.stream);
+    const mute = S.ctx.createGain(); mute.gain.value = 0;     // keep the graph pulled without echoing the mic
+    src.connect(S.node); S.node.connect(mute); mute.connect(S.ctx.destination);
+    try { S.wake = await navigator.wakeLock.request("screen"); } catch (_) {}
+  }
+
+  function onMic(f32) {
+    let sum = 0;
+    for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+    const rms = Math.sqrt(sum / f32.length);
+    // Barge-in: sustained speech over the assistant's voice stops its playback.
+    if (S.state === "speaking" && !S.muted) {
+      S.loudRun = rms > 0.06 ? S.loudRun + 1 : 0;
+      if (S.loudRun >= 3) { S.loudRun = 0; stopPlayback(); send({ type: "barge_in" }); setState("listening"); }
+    }
+    const ws = S.ws;
+    if (S.muted || !ws || ws.readyState !== WebSocket.OPEN || !S.ready) return;
+    const i16 = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) { const v = Math.max(-1, Math.min(1, f32[i])); i16[i] = v < 0 ? v * 32768 : v * 32767; }
+    ws.send(i16.buffer);
+  }
+
+  // ---- playback of the assistant's int16 24 kHz PCM ----
+  function playChunk(buf) {
+    const len = buf.byteLength & ~1;   // a frame must hold whole 16-bit samples
+    const i16 = new Int16Array(len === buf.byteLength ? buf : buf.slice(0, len));
+    if (!i16.length) return;
+    const f32 = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    const ab = S.ctx.createBuffer(1, f32.length, S.ttsRate);
+    ab.copyToChannel(f32, 0);
+    const src = S.ctx.createBufferSource(); src.buffer = ab; src.connect(S.ctx.destination);
+    const at = Math.max(S.ctx.currentTime + 0.04, S.playhead);
+    src.start(at); S.playhead = at + ab.duration;
+    S.sources.add(src);
+    src.onended = () => { S.sources.delete(src); if (!S.sources.size && S.ttsDone) { S.ttsDone = false; if (S.active) setState("listening"); } };
+    if (S.state !== "speaking") setState("speaking");
+  }
+  function stopPlayback() {
+    for (const s of S.sources) { try { s.onended = null; s.stop(); } catch (_) {} }
+    S.sources.clear(); S.playhead = 0; S.ttsDone = false;
+  }
+
+  // ---- the socket ----
+  function send(obj) { if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(JSON.stringify(obj)); }
+
+  async function connect() {
+    const ticket = await fetchTicket();
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/audio?ticket=${encodeURIComponent(ticket)}`);
+    ws.binaryType = "arraybuffer"; S.ws = ws; S.ready = false;
+    ws.onopen = () => send({ type: "audio_start", sample_rate: S.ctx.sampleRate, language: "uz-UZ" });
+    ws.onmessage = (ev) => (typeof ev.data === "string" ? onJson(ev.data) : playChunk(ev.data));
+    ws.onclose = (ev) => onClosed(ws, ev);
+    ws.onerror = () => {};
+  }
+
+  function onJson(text) {
+    let m; try { m = JSON.parse(text); } catch (_) { return; }
+    switch (m.type) {
+      case "audio_ready": S.ready = true; S.retries = 0; clearError(); setState("listening"); break;
+      case "transcript":
+        if (m.role === "assistant") addMessage("assistant", m.text || "", !m.is_final);
+        else { addMessage("user", m.text || "", !m.is_final); if (m.is_final) setState("thinking"); }
+        break;
+      case "thinking": setState("thinking"); break;
+      case "vad_silence": if (S.state === "thinking") setState("listening"); break;
+      case "tts_start": if (m.sample_rate) S.ttsRate = m.sample_rate; S.ttsDone = false; break;
+      case "tts_end": S.ttsDone = true; if (!S.sources.size && S.active) setState("listening"); break;
+      case "tts_cancel": stopPlayback(); if (S.active) setState("listening"); break;
+      case "tts_browser_fallback": // server has no voice for this turn: speak it with the device voice
+        try { const u = new SpeechSynthesisUtterance(m.text || ""); u.lang = "uz-UZ";
+              u.onend = () => send({ type: "tts_browser_done", id: m.id, outcome: "ended" });
+              u.onerror = () => send({ type: "tts_browser_done", id: m.id, outcome: "error" });
+              speechSynthesis.speak(u); } catch (_) { send({ type: "tts_browser_done", id: m.id, outcome: "error" }); }
+        break;
+      case "provider_error": case "error": showError(String(m.error || m.detail || T.network).slice(0, 400)); break;
+      case "hangup": endCall(T.ended); break;
+    }
+  }
+
+  async function onClosed(ws, ev) {
+    if (ws !== S.ws || S.ending || !S.active) return;
+    S.ready = false;
+    const reason = (ev && ev.reason) || "";
+    // 4401/4403 are boundary refusals, 1008/1011 are server-side refusals: retrying cannot fix them.
+    if ([4401, 4403, 1008, 1011].includes(ev && ev.code)) { showError(reason || T.closed); return endCall(null, true); }
+    if (S.retries >= 5) { showError(T.gaveUp); return endCall(null, true); }
+    const wait = Math.min(8000, 700 * 2 ** S.retries++);
+    setState("connecting", T.reconnecting); stopPlayback();
+    await new Promise((r) => setTimeout(r, wait));
+    if (!S.active || S.ending) return;
+    try { await connect(); } catch (e) { if (e.fatal) { showError(e.message); endCall(null, true); } else onClosed(S.ws || ws, { code: 1006 }); }
+  }
+
+  // ---- the call ----
+  async function startCall() {
+    clearError(); S.ending = false; S.retries = 0; S.active = true; els.call.disabled = true;
+    setState("connecting");
+    try {
+      await openAudio();            // inside the tap that started the call, so iOS allows audio
+      await connect();
+      els.call.disabled = false; els.call.textContent = T.end; els.call.className = "danger"; els.mute.disabled = false;
+    } catch (e) {
+      showError(e.message || T.network); teardown(); setState("error", T.ended); els.call.disabled = false;
+      if (/Safari/.test(e.message)) els.safari.classList.add("show");
+    }
+  }
+  function teardown() {
+    S.active = false; S.ready = false; stopPlayback();
+    try { send({ type: "audio_stop" }); } catch (_) {}
+    try { S.ws && S.ws.close(); } catch (_) {}
+    try { S.node && S.node.disconnect(); } catch (_) {}
+    try { S.stream && S.stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+    try { S.ctx && S.ctx.close(); } catch (_) {}
+    try { S.wake && S.wake.release(); } catch (_) {}
+    S.ws = S.node = S.stream = S.ctx = S.wake = null;
+  }
+  function endCall(text, keepError) {
+    S.ending = true; teardown();
+    if (!keepError) clearError();
+    setState(keepError ? "error" : "idle", text || T.ended);
+    els.call.textContent = T.start; els.call.className = "primary"; els.call.disabled = false;
+    els.mute.disabled = true; S.muted = false; document.body.dataset.muted = "0"; els.mute.textContent = T.mute;
+    els.safari.classList.add("show");
+  }
+
+  els.call.onclick = () => (S.active ? endCall(T.ended) : startCall());
+  els.mute.onclick = () => {
+    S.muted = !S.muted; document.body.dataset.muted = S.muted ? "1" : "0";
+    els.mute.textContent = S.muted ? T.unmute : T.mute;
+  };
+  els.safari.onclick = async () => {
+    // Telegram's WebView may refuse the microphone; Safari can ask for it. The
+    // hand-off code is single-use and expires within a minute.
+    try {
+      if (!S.sessionToken) { await fetchTicket(); }
+      const res = await fetch("/api/telegram/miniapp/handoff", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_token: S.sessionToken }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(T[data.error] || T.network);
+      const url = `${location.origin}/tg/#h=${data.code}`;
+      tg && tg.openLink ? tg.openLink(url, { try_instant_view: false }) : window.open(url, "_blank");
+    } catch (e) { showError(e.message || T.network); }
+  };
+  window.addEventListener("pagehide", () => { if (S.active) { S.ending = true; teardown(); } });
+  if (!tg || (!tg.initData && !HANDOFF)) { showError(T.notTelegram); els.call.disabled = true; }
+  setState("idle", T.ready);
+})();
+</script>
+</body>
+</html>

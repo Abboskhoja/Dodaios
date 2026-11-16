@@ -377,6 +377,13 @@ class WebServer:
             value
             for value in (
                 getattr(twilio_cfg, "public_base_url", ""),
+                # The Telegram Mini App's HTTPS address: its Host and Origin
+                # must pass the boundary for the call page and its voice socket.
+                getattr(
+                    getattr(getattr(self.cfg, "integrations", None), "telegram", None),
+                    "miniapp_url",
+                    "",
+                ),
                 getattr(
                     getattr(self.cfg, "marketplace", None),
                     "public_callback_base_url",
@@ -519,7 +526,6 @@ class WebServer:
         from .app_actions_routes import router as app_actions_router
         from .appshot_routes import router as appshot_router
         from .attention_routes import router as attention_router
-        from .status_light_routes import router as status_light_router
         from .board_routes import (
             board_router as board_meta_router,
         )
@@ -532,7 +538,6 @@ class WebServer:
         from .claude_routes import router as claude_router
         from .cli_routes import router as cli_router
         from .clipboard_routes import router as clipboard_router
-        from .link_icon_routes import router as link_icon_router
         from .commands_routes import router as commands_router
         from .computer_use_routes import router as computer_use_router
         from .computers_routes import router as computers_router
@@ -557,6 +562,7 @@ class WebServer:
         from .grok_build_routes import router as grok_build_router
         from .ide_browser_routes import router as ide_browser_router
         from .ide_skills_routes import router as ide_skills_router
+        from .link_icon_routes import router as link_icon_router
         from .live_routes import router as live_router
         from .living_pages_routes import router as living_pages_router
         from .local_models_assistant_routes import (
@@ -582,7 +588,6 @@ class WebServer:
         from .mobile_routes import router as mobile_router
         from .nodes_routes import router as nodes_router
         from .notify_routes import router as notify_router
-        from .slack_channel_routes import router as slack_channel_router
         from .onboarding_routes import router as onboarding_router
         from .outputs_routes import router as outputs_router
         from .permissions_routes import router as permissions_router
@@ -590,6 +595,7 @@ class WebServer:
         from .pets_routes import router as pets_router
         from .preview_routes import router as preview_router
         from .profile_routes import router as profile_router
+        from .project_routes import router as project_router
         from .provider_routes import router as provider_router
         from .review_routes import router as review_router
         from .ritual_routes import router as ritual_router
@@ -604,16 +610,18 @@ class WebServer:
         from .settings_routes import router as settings_router
         from .setup_report_routes import router as setup_report_router
         from .skills_routes import router as skills_router
+        from .slack_channel_routes import router as slack_channel_router
         from .socials_routes import router as socials_router
         from .society_browser_routes import router as society_browser_router
         from .society_figure_routes import router as society_figure_router
         from .society_routes import router as society_router
         from .soul_routes import router as soul_router
-        from .project_routes import router as project_router
         from .starter_plan_routes import router as starter_plan_router
+        from .status_light_routes import router as status_light_router
         from .sub_agents_routes import router as sub_agents_router
         from .tasks_routes import router as tasks_router
         from .team_thread_routes import router as team_thread_router
+        from .telegram_miniapp_routes import router as telegram_miniapp_router
         from .telephony_routes import router as telephony_router
         from .tool_model_routes import router as tool_model_router
         from .tools_routes import router as tools_router
@@ -783,6 +791,8 @@ class WebServer:
         app.include_router(computers_router)
         # Settings -> Phone: the paired phone's companion app and its pushes.
         app.include_router(mobile_router)
+        # Telegram Mini App: live voice call inside Telegram (owner only).
+        app.include_router(telegram_miniapp_router)
         # Desktop pets — the `pet` overlay style's pets, look and visibility.
         app.include_router(pets_router)
         # Looks — in-app visuals in the orb's place, and their sandboxed frame files.

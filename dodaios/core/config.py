@@ -2394,6 +2394,10 @@ class TelegramConfig(BaseModel):
     # private message, an otherwise empty allowlist is claimed by that sender
     # and persisted to jarvis.toml.
     pair_on_first_private_message: bool = True
+    # Public HTTPS address of this app that serves the live-voice Mini App
+    # (``<miniapp_url>/tg/``). Telegram opens Mini Apps over HTTPS only, so a
+    # tunnel or domain in front of this app is needed; empty = no call button.
+    miniapp_url: str = ""
 
 
 class TwilioConfig(BaseModel):

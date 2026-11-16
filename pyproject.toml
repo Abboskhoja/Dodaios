@@ -962,6 +962,7 @@ call-contact = "dodaios.plugins.tool.call_contact:CallContactTool"
 conductor = ["core/schema.sql", "seed/*.yaml"]
 dodaios = [
     "ui/web/dist/**/*",
+    "ui/web/miniapp/*",
     "ui/web/dist/*",
     "assets/**/*",
     # The original brand marks (+ their LOGOS.md provenance ledgers) the

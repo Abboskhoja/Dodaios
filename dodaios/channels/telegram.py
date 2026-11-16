@@ -259,6 +259,9 @@ class TelegramChannel:
                 self._app.add_handler(
                     CallbackQueryHandler(self._on_callback_query, pattern=r"^apr:")
                 )
+                self._app.add_handler(
+                    CallbackQueryHandler(self._on_menu_callback, pattern=r"^jv:")
+                )
             self._app.add_handler(MessageHandler(filters.ALL, self._on_telegram_msg))
 
             await self._app.initialize()
@@ -409,12 +412,15 @@ class TelegramChannel:
 
             command = text.strip().lower().split(maxsplit=1)[0] if text.strip() else ""
             if command in {"/start", "/help"}:
-                await self._send_text(
+                # One message: the greeting carries the menu keyboard.
+                await self._send_menu(
                     chat_id,
                     "Telegram is connected. Send a message here and I will "
                     "forward it directly to Dodaios.",
-                    language="en",
                 )
+                return
+            if command == "/menu":
+                await self._send_menu(chat_id)
                 return
 
             media = await self._media_of(msg_obj)
@@ -778,6 +784,72 @@ class TelegramChannel:
             await query.edit_message_text(text=f"{original}\n\n{answer}", reply_markup=None)
         except Exception as exc:  # noqa: BLE001
             log.debug("Telegram callback edit failed: %s", _safe_error(exc))
+
+    async def _send_menu(self, chat_id: int, text: str | None = None) -> None:
+        """The five-button menu (call, voice message, text, AI state, security)."""
+        if self._app is None:
+            return
+        from telegram import (  # noqa: WPS433
+            InlineKeyboardButton,
+            InlineKeyboardMarkup,
+            WebAppInfo,
+        )
+
+        from dodaios.channels.telegram_menu import MENU_TITLE, menu_buttons
+
+        rows = [
+            [
+                InlineKeyboardButton(b.label, web_app=WebAppInfo(url=b.web_app_url))
+                if b.web_app_url
+                else InlineKeyboardButton(b.label, callback_data=b.callback_data)
+            ]
+            for b in menu_buttons(self._cfg.miniapp_url)
+        ]
+        try:
+            await self._app.bot.send_message(
+                chat_id=chat_id, text=text or MENU_TITLE, reply_markup=InlineKeyboardMarkup(rows)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Telegram menu send failed: %s", _safe_error(exc))
+
+    async def _on_menu_callback(self, update: Any, _ctx: Any) -> None:
+        """A menu button that answers in the chat; owner only."""
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        from dodaios.channels.telegram_menu import callback_action, miniapp_page_url, reply_for
+
+        user_id = getattr(getattr(query, "from_user", None), "id", None)
+        action = callback_action(str(getattr(query, "data", "") or ""))
+        try:
+            await query.answer()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Telegram menu answer failed: %s", _safe_error(exc))
+        if action is None or user_id not in self._cfg.allowed_user_ids:
+            return
+        stt = tts = mode = ""
+        if action == "status":
+            try:
+                from dodaios.core.config import load_config
+
+                cfg = await asyncio.to_thread(load_config)
+                stt, tts, mode = str(cfg.stt.provider), str(cfg.tts.provider), str(cfg.voice.mode)
+            except Exception as exc:  # noqa: BLE001 - the status still answers
+                log.debug("Telegram status: config unreadable: %s", _safe_error(exc))
+        chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+        if chat_id is None:
+            return
+        await self._send_text(
+            chat_id,
+            reply_for(
+                action,
+                stt=stt,
+                tts=tts,
+                voice_mode=mode,
+                miniapp_ready=bool(miniapp_page_url(self._cfg.miniapp_url)),
+            ),
+            language="en",
+        )
 
     async def _send_text(self, chat_id: int, text: str, *, language: str) -> None:
         if self._app is None:
