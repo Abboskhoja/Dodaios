@@ -57,6 +57,15 @@ from dodaios.sessions.constants import HANGUP_CLIENT_STOP
 
 log = logging.getLogger("dodaios.browser_voice")
 
+# A brain that has said nothing for this long is stalled (a provider retry loop,
+# a tool that never returns). The person hears a short apology instead of silence.
+_BRAIN_FIRST_CHUNK_TIMEOUT_S = 40.0
+_BRAIN_CHUNK_GAP_TIMEOUT_S = 25.0
+_BRAIN_STALL_APOLOGY = {
+    "uz": "Kechirasiz, javob kechikdi. Iltimos, savolni yana bir bor ayting.",
+    "en": "Sorry, the answer is taking too long. Please ask again.",
+}
+
 SendBinary = Callable[[bytes], Awaitable[None]]
 SendJson = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -564,8 +573,19 @@ class BrowserVoiceSession:
         buffer = ""
         if timing is not None:
             timing.mark("brain_start")
+        stream = self._brain.generate_stream(text).__aiter__()
+        limit = _BRAIN_FIRST_CHUNK_TIMEOUT_S
+        stalled = False
         try:
-            async for chunk in self._brain.generate_stream(text):
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(anext(stream), timeout=limit)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    stalled = True
+                    break
+                limit = _BRAIN_CHUNK_GAP_TIMEOUT_S
                 if not chunk:
                     continue
                 if timing is not None:
@@ -575,6 +595,21 @@ class BrowserVoiceSession:
                 while (cut := next_sentence_break(buffer, first=not spoken_parts)) is not None:
                     sentence, buffer = buffer[:cut], buffer[cut:]
                     await _queue(sentence)
+            if stalled:
+                log.warning("browser_voice[%s] brain stalled; apologising", self.session_id)
+                closer = getattr(stream, "aclose", None)
+                if callable(closer):
+                    try:
+                        await asyncio.wait_for(closer(), timeout=2.0)
+                    except Exception:  # noqa: BLE001 - the stalled stream is abandoned either way
+                        log.debug("browser_voice stalled stream did not close", exc_info=True)
+                if buffer.strip():
+                    await _queue(buffer)
+                    buffer = ""
+                tag = (self.language_code or "en").split("-", 1)[0].lower()
+                apology = _BRAIN_STALL_APOLOGY.get(tag, _BRAIN_STALL_APOLOGY["en"])
+                chunks.append(apology)
+                await _queue(apology)
             if buffer.strip():
                 await _queue(buffer)
             if timing is not None:

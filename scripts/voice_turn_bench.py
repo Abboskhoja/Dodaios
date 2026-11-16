@@ -59,12 +59,27 @@ async def synthetic(cfg: object, texts: tuple[str, ...]) -> list[bytes]:
     return out
 
 
+async def _stall_reporter(every_s: float) -> None:
+    """Debug aid: show what every pending task is waiting on, now and then."""
+    while True:
+        await asyncio.sleep(every_s)
+        print(f"--- pending tasks after {every_s:.0f} s ---", flush=True)
+        for task in asyncio.all_tasks():
+            if task is asyncio.current_task():
+                continue
+            frames = task.get_stack(limit=3)
+            where = " <- ".join(f"{f.f_code.co_name}:{f.f_lineno}" for f in frames)
+            print(f"  {task.get_name()}: {where}", flush=True)
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--wav", nargs="*", type=Path, default=[])
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--out", type=Path, default=Path("voice_bench.json"))
     parser.add_argument("--silence-ms", type=int, default=700, help="end-of-turn silence")
+    parser.add_argument("--stall-report-s", type=float, default=0.0,
+                        help="print every pending task's stack after this many quiet seconds")
     args = parser.parse_args()
 
     from dodaios.brain.factory import build_default_brain
@@ -102,6 +117,8 @@ async def main() -> int:
         owns_brain=True,
     )
     session._endpointer.silence_ms = args.silence_ms  # noqa: SLF001
+    if args.stall_report_s:
+        asyncio.create_task(_stall_reporter(args.stall_report_s))
     frame = STT_SAMPLE_RATE * FRAME_MS // 1000 * 2
     silence = b"\x00" * frame
     rows = []

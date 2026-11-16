@@ -140,3 +140,29 @@ async def test_barge_in_during_a_streamed_reply_stops_the_audio():
     await asyncio.sleep(0.2)
     assert len(sink.binary) - count <= 1
     assert any(m.get("type") == "tts_cancel" for m in sink.json)
+
+
+class _HungBrain:
+    """Never produces a token: a provider retry loop or a tool that never returns."""
+
+    def __init__(self) -> None:
+        self._history: list[str] = []
+
+    async def generate_stream(self, user_text: str, **_kw):
+        await asyncio.Event().wait()
+        yield ""
+
+
+async def test_a_stalled_brain_ends_in_a_short_apology_not_silence(monkeypatch):
+    from dodaios.browser_voice import session as session_mod
+
+    monkeypatch.setattr(session_mod, "_BRAIN_FIRST_CHUNK_TIMEOUT_S", 0.1)
+    sink = _Sink()
+    tts = _SlowTTS(chunks=2, delay=0.001)
+    session = _make_session(sink, brain=_HungBrain(), stt=FakeSTT(["Salom"]), tts=tts)
+    session.language_code = "uz-UZ"
+    await _drive_one_utterance(session)
+    await asyncio.sleep(0.5)
+    assert tts.calls and tts.calls[0][0].startswith("Kechirasiz")
+    assert session.turns == 1
+    assert not session._processing  # noqa: SLF001 - the call is free for the next question
