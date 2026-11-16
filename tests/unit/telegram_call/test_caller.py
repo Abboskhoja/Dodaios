@@ -105,7 +105,7 @@ class FakeSession:
         self.ended = reason
 
 
-def build(*, secrets=SECRETS, client=None, calls=None, guard=None, owner=OWNER):
+def build(*, secrets=SECRETS, client=None, calls=None, guard=None, owner=OWNER, synth=None):
     client = client or FakeClient()
     calls = calls or FakeCalls()
     made: list[FakeSession] = []
@@ -129,6 +129,7 @@ def build(*, secrets=SECRETS, client=None, calls=None, guard=None, owner=OWNER):
         telethon_factory=lambda *a: client,
         calls_factory=lambda c: calls,
         types_factory=lambda: FAKE_TYPES,
+        greeting_synth=synth,
     )
     return caller, client, calls, made
 
@@ -218,5 +219,42 @@ async def test_a_second_request_during_a_call_is_busy():
     task = asyncio.create_task(caller.call_owner(confirmed=True))
     await asyncio.sleep(0.05)
     assert await refusal(caller, confirmed=True) == "busy"
+    await calls.handlers["chat"](None, SimpleNamespace(chat_id=OWNER, status=1))
+    await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
+async def test_greeting_is_rendered_while_ringing_and_played_on_pickup():
+    rendered: list[str] = []
+
+    async def synth(text: str) -> bytes:
+        rendered.append(text)
+        return b"\x03\x00" * 4800  # 200 ms at 24 kHz
+
+    caller, _, calls, made = build(synth=synth)
+    task = asyncio.create_task(caller.call_owner(confirmed=True))
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if len(calls.sent) >= 5:
+            break
+    assert rendered == ["Salom! Eshitaman."]
+    assert made[0].said == []  # not synthesised a second time through the session
+    assert calls.sent
+    await calls.handlers["chat"](None, SimpleNamespace(chat_id=OWNER, status=1))
+    await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
+async def test_failed_prefetch_falls_back_to_speaking_the_greeting_live():
+    async def synth(text: str) -> bytes:
+        raise RuntimeError("tts down")
+
+    caller, _, calls, made = build(synth=synth)
+    task = asyncio.create_task(caller.call_owner(confirmed=True))
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if made and made[0].said:
+            break
+    assert made[0].said == ["Salom! Eshitaman."]
     await calls.handlers["chat"](None, SimpleNamespace(chat_id=OWNER, status=1))
     await asyncio.wait_for(task, 2)

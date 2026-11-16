@@ -84,3 +84,23 @@ Telegram can still refuse or throttle a fresh account.
 5. From the owner's phone, open the assistant account and press Start / save it
    as a contact (so Telegram lets it ring you).
 6. Ask the assistant to call you; approve the confirmation.
+
+## Measured on this Mac (2026-11-16, synthetic Uzbek speech in, free-tier Gemini)
+
+Whole local chain through `CallAudioBridge` + `BrowserVoiceSession`, no
+Telegram involved: question audio -> STT -> brain -> TTS -> paced frames.
+
+| Stage | Faster-Whisper `large-v3-turbo` (CPU) | Gemini `gemini-3.1-flash-lite` (free tier) |
+|---|---|---|
+| STT, 2-4 s clip | 5.7-6.0 s warm; text wrong (`Menge bugünkü işlerimna ait`) | 2.1-3.7 s; text exact |
+| Brain, short turn / turn with a tool | - | 3.7 s / 5.8 s |
+| Edge TTS (Sardor), first audio | 2.3 s (not streaming: whole sentence first) | - |
+
+End to end the first reply audio arrived 18.6 s after the end of speech
+(reply was 17 s long: the assistant tried the calendar tool and explained it
+was not connected). That is too slow for a natural call; the biggest levers are
+a shorter spoken reply, streaming TTS and brain tokens, and a smaller
+endpointing delay. The greeting is now rendered while the phone rings.
+Free-tier limits apply (`gemini-3.1-pro-preview` has none; `gemini-3-flash-preview` 5
+requests a minute), so the models are pinned to `gemini-3.1-flash-lite`. The
+STT text leaves the machine.

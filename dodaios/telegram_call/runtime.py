@@ -45,6 +45,24 @@ def _session_factory(cfg: Any):
     return factory
 
 
+def _greeting_synth(cfg: Any):
+    async def synth(text: str) -> bytes:
+        from dodaios.browser_voice.audio import TTS_SAMPLE_RATE, resample_pcm16
+        from dodaios.plugins.tts import build_tts_from_config
+
+        tts = build_tts_from_config(cfg.tts)
+        pcm = bytearray()
+        async for chunk in tts.synthesize(text, language_code="uz-UZ"):
+            data = getattr(chunk, "pcm", b"")
+            rate = int(getattr(chunk, "sample_rate", TTS_SAMPLE_RATE) or TTS_SAMPLE_RATE)
+            pcm.extend(
+                resample_pcm16(data, rate, TTS_SAMPLE_RATE) if rate != TTS_SAMPLE_RATE else data
+            )
+        return bytes(pcm)
+
+    return synth
+
+
 def get_caller(cfg: Any | None = None) -> TelegramCaller:
     """The process-wide caller; its guard persists so pauses and caps hold."""
     global _caller, _guard  # noqa: PLW0603
@@ -62,6 +80,7 @@ def get_caller(cfg: Any | None = None) -> TelegramCaller:
             owner_user_id=owner_id_of(cfg),
             guard=_guard,
             session_factory=_session_factory(cfg),
+            greeting_synth=_greeting_synth(cfg),
             read_secret=lambda key: cfg_mod.get_secret(key, None),
         )
     return _caller

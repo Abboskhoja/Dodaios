@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,6 +49,7 @@ class TelegramCaller:
         telethon_factory: Callable[[str, int, str], Any] | None = None,
         calls_factory: Callable[[Any], Any] | None = None,
         types_factory: Callable[[], Any] | None = None,
+        greeting_synth: Callable[[str], Awaitable[bytes]] | None = None,
     ) -> None:
         self._cfg = cfg
         self._owner = int(owner_user_id)
@@ -58,6 +59,9 @@ class TelegramCaller:
         self._telethon_factory = telethon_factory or _default_telethon
         self._calls_factory = calls_factory or _default_calls
         self._types_factory = types_factory or _call_types
+        # Renders the greeting to 24 kHz PCM while the phone rings, so it is
+        # heard the moment the owner picks up instead of after a synthesis wait.
+        self._greeting_synth = greeting_synth
         self._lock = asyncio.Lock()
 
     # -- public ------------------------------------------------------------
@@ -138,15 +142,30 @@ class TelegramCaller:
                 if update.chat_id == self._owner and update.status & ct.left_call:
                     hung_up.set()
 
+            prefetch: asyncio.Task[bytes] | None = None
+            if self._greeting_synth is not None and greeting:
+                prefetch = asyncio.create_task(
+                    self._greeting_synth(greeting), name="tgcall-greeting"
+                )
             await calls.start()
             try:
                 await calls.play(
                     self._owner, ct.stream(RATE), ct.call_config(int(self._cfg.ring_timeout_s))
                 )
             except Exception as exc:  # noqa: BLE001 - classified by name below
+                if prefetch is not None:
+                    prefetch.cancel()
                 return CallResult(_classify(exc))
             await calls.record(self._owner, ct.record_stream(RATE))
-            await bridge.start(greeting)
+            greeting_pcm = b""
+            if prefetch is not None:
+                try:
+                    greeting_pcm = await prefetch
+                except Exception:  # noqa: BLE001 - fall back to speaking it live
+                    log.debug("telegram call: greeting prefetch failed", exc_info=True)
+            await bridge.start("" if greeting_pcm else greeting)
+            if greeting_pcm:
+                await bridge.send_binary(greeting_pcm)
             try:
                 await asyncio.wait_for(hung_up.wait(), timeout=float(self._cfg.max_call_s))
             except TimeoutError:
