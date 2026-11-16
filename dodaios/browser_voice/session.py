@@ -42,6 +42,8 @@ from dodaios.browser_voice.audio import (
     EnergyEndpointer,
     Resampler,
 )
+from dodaios.browser_voice.sentences import next_sentence_break
+from dodaios.browser_voice.timing import TurnTimings
 from dodaios.core.events import (
     ResponseGenerated,
     SpeechSpoken,
@@ -207,6 +209,9 @@ class BrowserVoiceSession:
         self._queued: list[bytes] = []
         self._overlap_lock = asyncio.Lock()
         self._side_tasks: set[asyncio.Task[None]] = set()
+        #: Marks of the turn in flight and of the finished turns (see ``timing``).
+        self._timing: TurnTimings | None = None
+        self.timings: list[TurnTimings] = []
 
     # -- public properties -------------------------------------------------
 
@@ -255,6 +260,8 @@ class BrowserVoiceSession:
         self._reply_started = False
         self._current_utterance = utterance
         self._utterance_ended_at = time.monotonic()
+        self._timing = TurnTimings()
+        self._timing.mark("speech_end", self._utterance_ended_at)
         self._turn_task = asyncio.create_task(
             self._run_turn(utterance, transcript=transcript),
             name=f"bv-turn-{self.session_id}",
@@ -421,8 +428,13 @@ class BrowserVoiceSession:
         user_text = ""
         full_reply = ""
         try:
+            timing = self._timing
+            if timing is not None:
+                timing.mark("stt_start")
             if transcript is None:
                 transcript = await self._transcribe(utterance_pcm16)
+            if timing is not None:
+                timing.mark("stt_end")
             text = (transcript or "").strip()
             if not text:
                 # End-of-turn fired but nothing transcribable — let the browser
@@ -447,47 +459,10 @@ class BrowserVoiceSession:
                 TranscriptionUpdate(text=text, is_final=True, source_layer="browser_voice")
             )
 
-            response = await self._think(text)
-            full_reply = response or ""
-            scrubbed = scrub_for_voice(response, language=self._lang_short())
-            if is_harmless_scrub_residue(scrubbed):
-                # The whole reply was filler / an honorific, so the residue
-                # guard emptied it and returned the generic error phrase.
-                # Nothing failed — say nothing rather than claim an error.
-                log.info(
-                    "browser_voice[%s] reply carried no substance (%s) — "
-                    "staying silent instead of speaking the error phrase: %r",
-                    self.session_id,
-                    scrubbed.actions,
-                    response[:80],
-                )
+            full_reply, spoken_any = await self._think_and_speak(text, turn_id)
+            if not spoken_any:
                 await self._complete_bus_turn(turn_id, user_text, "")
                 return
-            spoken = scrubbed.cleaned
-            if not spoken.strip():
-                await self._complete_bus_turn(turn_id, user_text, "")
-                return
-            await self._publish(
-                ResponseGenerated(
-                    text=full_reply,
-                    language=self._lang_short(),
-                    source_layer="browser_voice",
-                )
-            )
-            await self._publish(
-                SpeechSpoken(
-                    text=spoken,
-                    language=self._lang_short(),
-                    spoken_kind="reply",
-                    source_layer="browser_voice",
-                )
-            )
-            self._reply_started = True
-            self._tts_task = asyncio.create_task(self._speak(spoken))
-            try:
-                await self._tts_task
-            except asyncio.CancelledError:
-                pass  # barge-in cancelled playback mid-stream — normal
             # A turn is "complete" once the response was (at least partly) spoken,
             # mirroring the telephony session's count semantics.
             self._turns += 1
@@ -542,12 +517,100 @@ class BrowserVoiceSession:
         result = await self._stt.transcribe_pcm(pcm16, sample_rate=STT_SAMPLE_RATE)
         return getattr(result, "text", "") or ""
 
-    async def _think(self, text: str) -> str:
+    async def _think_and_speak(self, text: str, turn_id: str | None) -> tuple[str, bool]:
+        """Stream the brain's reply and speak each sentence as soon as it is whole.
+
+        Returns ``(full reply text, whether anything was spoken)``. A worker task
+        synthesizes the queued sentences one after another while the brain is
+        still writing, so the first audible word waits for the first sentence,
+        not for the whole reply. The worker is ``_tts_task``: a barge-in cancels
+        it exactly like a whole-reply utterance.
+        """
+        timing = self._timing
+        language = self._lang_short()
+        sentences: asyncio.Queue[str | None] = asyncio.Queue()
+        spoken_parts: list[str] = []
+
+        async def _speak_queued() -> None:
+            while True:
+                sentence = await sentences.get()
+                if sentence is None:
+                    return
+                await self._speak(sentence)
+
+        async def _queue(sentence: str) -> None:
+            scrubbed = scrub_for_voice(sentence, language=language)
+            if is_harmless_scrub_residue(scrubbed):
+                # Filler or an honorific: nothing failed, so say nothing rather
+                # than speak the generic error phrase.
+                log.info("browser_voice[%s] skipping filler sentence", self.session_id)
+                return
+            cleaned = scrubbed.cleaned
+            if not cleaned.strip():
+                return
+            spoken_parts.append(cleaned)
+            self._reply_started = True
+            await self._publish(
+                SpeechSpoken(
+                    text=cleaned, language=language, spoken_kind="reply",
+                    source_layer="browser_voice",
+                )
+            )
+            await sentences.put(cleaned)
+
+        worker = asyncio.create_task(_speak_queued(), name=f"bv-speak-{self.session_id}")
+        self._tts_task = worker
         chunks: list[str] = []
-        async for chunk in self._brain.generate_stream(text):
-            if chunk:
+        buffer = ""
+        if timing is not None:
+            timing.mark("brain_start")
+        try:
+            async for chunk in self._brain.generate_stream(text):
+                if not chunk:
+                    continue
+                if timing is not None:
+                    timing.mark("brain_first")
                 chunks.append(chunk)
-        return "".join(chunks)
+                buffer += chunk
+                while (cut := next_sentence_break(buffer, first=not spoken_parts)) is not None:
+                    sentence, buffer = buffer[:cut], buffer[cut:]
+                    await _queue(sentence)
+            if buffer.strip():
+                await _queue(buffer)
+            if timing is not None:
+                timing.mark("brain_end")
+            full_reply = "".join(chunks)
+            await self._publish(
+                ResponseGenerated(
+                    text=full_reply, language=language, source_layer="browser_voice"
+                )
+            )
+            await sentences.put(None)
+            try:
+                await worker
+            except asyncio.CancelledError:
+                if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                    raise  # the whole turn was cancelled, not just the playback
+            return full_reply, bool(spoken_parts)
+        finally:
+            if not worker.done():
+                worker.cancel()
+            self._finish_timing()
+
+    def _finish_timing(self) -> None:
+        """File the turn's marks and tell the client how long each stage took."""
+        timing, self._timing = self._timing, None
+        if timing is None or "tts_first_audio" not in timing.marks:
+            return
+        self.timings.append(timing)
+        stages = timing.stages()
+        log.info("browser_voice[%s] turn timing ms: %s", self.session_id, stages)
+        task = asyncio.create_task(
+            self._send_json({"type": "turn_timing", "stages_ms": stages}),
+            name=f"bv-timing-{self.session_id}",
+        )
+        self._side_tasks.add(task)
+        task.add_done_callback(self._side_tasks.discard)
 
     async def say(self, text: str) -> None:
         """Speak one fixed line (a call's greeting) as a cancellable utterance.
@@ -561,7 +624,9 @@ class BrowserVoiceSession:
         self._tts_task = task
         await asyncio.wait({task})
         if not task.cancelled() and task.exception() is not None:
-            log.warning("browser_voice[%s] greeting failed", self.session_id, exc_info=task.exception())
+            log.warning(
+                "browser_voice[%s] greeting failed", self.session_id, exc_info=task.exception()
+            )
 
     async def _speak(self, text: str) -> int:
         """Synthesize ``text`` and stream the raw PCM straight back as binary WS
@@ -621,6 +686,8 @@ class BrowserVoiceSession:
                 if not pcm:
                     continue
                 if sent == 0:
+                    if self._timing is not None:
+                        self._timing.mark("tts_first_audio")
                     await self._send_json(
                         {"type": "tts_start", "sample_rate": TTS_SAMPLE_RATE}
                     )
