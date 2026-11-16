@@ -27,6 +27,16 @@ The 2-4 s target is not reachable with the current parts: end-of-turn silence
 5.2 s at best. The one lever that could cut the largest piece is a fast
 on-device recognizer, which is why the benchmark below exists.
 
+## A stalled brain
+
+On the question "Tell me about Python in Uzbek" the brain sometimes said nothing
+for more than 75 s in the bench (task dump: the turn waited on the brain stream,
+the speaking worker on an empty queue; no deadlock in the voice code). Turns
+that the router treats as actions, and free-tier throttling, give 8-23 s first
+tokens in the same bench. On a call this used to mean silence without end. The
+call/Mini App path now speaks a short apology when the brain is silent for 40 s
+(25 s mid-reply). The desktop pipeline has its own stall guard already.
+
 ## Changes in code
 
 - `BrowserVoiceSession`: the brain stream is cut at the first whole sentence
@@ -72,3 +82,22 @@ so it was not switched on. Trying it is a decision for you.
    (add `onnx` or another engine only after you approve its download).
 3. Restart Dodaios, say the five test sentences, then run
    `python -m dodaios.tools.latency_report`.
+
+## Synthetic bench, same four prompts (not a real-user test)
+
+`scripts/voice_turn_bench.py --synthetic`, Gemini STT and brain, Edge TTS,
+one session so the brain remembers. Milliseconds, first audio of each turn.
+
+| Run | STT | Brain first token | TTS first audio | Total to first audio |
+|---|---|---|---|---|
+| Before streaming and Edge decode, turns 1-4 (median / p95) | 2554 / 3229 | 4293 / 8643 | 2568 / 2722 | 9676 / 13181 |
+| After, turn 1 (cold) | 3350 | 7918 | 1353 | 12621 |
+| After, turn 2 | 9025 (one slow Gemini call) | 2961 | 1151 | 13137 |
+| After, second run, turn 1 | 4038 | 12459 | 1252 | 17749 |
+| After, second run, turn 2 (tool turn) | 1747 | 22934 | 2646 | 27327 |
+
+Only the TTS column improved with certainty (2.6 s -> 1.2-1.4 s, outside the
+bench: 1.17-1.54 s over six calls). STT and brain times swing by seconds from
+call to call on the free tier, so four turns cannot show a median gain there;
+the real-voice numbers come from `latency_report` after you use the app.
+Peak resident memory of the bench process: about 225 MB.
