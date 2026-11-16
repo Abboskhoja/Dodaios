@@ -1831,6 +1831,22 @@ def _build_flash_provider(jcfg: Any, ack_cfg: Any) -> Any:
     return provider_cls(provider_cfg)
 
 
+def _local_server_reachable(provider_cfg: Any, timeout_s: float = 0.25) -> bool:
+    """Whether the keyless provider's HTTP endpoint accepts a TCP connection."""
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        root = provider_cfg.resolved_endpoint()
+        parsed = urlparse(root if "//" in root else f"//{root}")
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except Exception:  # noqa: BLE001 - any failure means "not usable now"
+        return False
+
+
 def _pick_keyed_flash_fallback(ack_cfg: Any, jcfg: Any = None) -> str | None:
     """First REGISTRY provider family with a usable credential, or ``None``.
 
@@ -1856,7 +1872,13 @@ def _pick_keyed_flash_fallback(ack_cfg: Any, jcfg: Any = None) -> str | None:
             continue
         secret_name = getattr(provider_cfg, "api_key_secret", None)
         if secret_name is None:
-            return deferred or name
+            # A keyless provider is a LOCAL server: usable only while it
+            # answers. Naming a server that is not installed made every flash
+            # call wait out a connect timeout (live 2026-11-16: no Ollama).
+            if _local_server_reachable(provider_cfg):
+                return deferred or name
+            log.info("Flash-Brain: local provider %r is not reachable; skipped.", name)
+            continue
         # The family resolver is the second probe so a credential that lives
         # only in a scoped slot of the same family (e.g. the Realtime card's
         # key) still marks the provider usable — the adapters resolve their

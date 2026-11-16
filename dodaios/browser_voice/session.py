@@ -549,6 +549,20 @@ class BrowserVoiceSession:
                 chunks.append(chunk)
         return "".join(chunks)
 
+    async def say(self, text: str) -> None:
+        """Speak one fixed line (a call's greeting) as a cancellable utterance.
+
+        A barge-in cancels it exactly like a reply; this method then returns
+        normally instead of propagating the cancellation of the inner task.
+        """
+        if self._ended or not text.strip():
+            return
+        task = asyncio.create_task(self._speak(text), name=f"bv-say-{self.session_id}")
+        self._tts_task = task
+        await asyncio.wait({task})
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("browser_voice[%s] greeting failed", self.session_id, exc_info=task.exception())
+
     async def _speak(self, text: str) -> int:
         """Synthesize ``text`` and stream the raw PCM straight back as binary WS
         frames. The browser plays them via Web Audio at ``TTS_SAMPLE_RATE`` — no

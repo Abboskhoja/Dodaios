@@ -303,6 +303,13 @@ full = [
 # per the cloud-first doctrine: the base install must boot without it, and the
 # telephony routes degrade gracefully when it is absent (AD-T8). BASE carries
 # audioop-lts on Python 3.13+ because browser voice shares the resampler.
+# The assistant's own Telegram account rings its owner (docs/telegram-call.md).
+# Pinned to the versions the feasibility check inspected; py-tgcalls is LGPL-3.
+telegram-call = [
+    "telethon==1.45.0",
+    "py-tgcalls==3.0.1",
+    "ntgcalls==3.0.7",
+]
 telephony = [
     # Stream/Connect TwiML, RequestValidator and the REST client used here are
     # stable since 8.x; verified green against the installed 8.11.0.
@@ -948,6 +955,7 @@ reveal-key-preview = "dodaios.plugins.tool.reveal_key_preview:RevealKeyPreviewTo
 contact-lookup = "dodaios.plugins.tool.contact_lookup:ContactLookupTool"
 contact-upsert = "dodaios.plugins.tool.contact_upsert:ContactUpsertTool"
 call-contact = "dodaios.plugins.tool.call_contact:CallContactTool"
+call-owner = "dodaios.plugins.tool.call_owner:CallOwnerTool"
 
 # The package list (dodaios, conductor and the legacy ``jarvis`` alias built
 # from dodaios/_legacy_alias) is in setup.py: a ``packages`` table here would

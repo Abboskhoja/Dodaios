@@ -2400,6 +2400,29 @@ class TelegramConfig(BaseModel):
     miniapp_url: str = ""
 
 
+class TelegramCallConfig(BaseModel):
+    """The assistant's own Telegram user account rings its owner (opt-in).
+
+    ``api_id`` is an identifier (not secret). ``api_hash`` and the login
+    session are secrets in the credential store (``telegram_call_api_hash``,
+    ``telegram_call_session``); nothing here ever holds them. The account
+    is signed in only by the owner, with ``scripts/telegram_call_login.py``.
+    """
+
+    enabled: bool = False
+    api_id: int = 0
+    #: The one Telegram user the assistant may call. 0 = the first paired
+    #: owner of ``[integrations.telegram].allowed_user_ids``.
+    owner_user_id: int = 0
+    ring_timeout_s: int = 45
+    max_call_s: int = 900
+    silence_timeout_s: float = 60.0
+    max_calls_per_day: int = 3
+    pause_between_calls_s: float = 300.0
+    declined_block_s: float = 1800.0
+    greeting: str = "Salom! Eshitaman."
+
+
 class TwilioConfig(BaseModel):
     """Twilio telephony integration: call a phone number and talk to Jarvis.
 
@@ -2517,6 +2540,7 @@ class IntegrationsConfig(BaseModel):
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     slack: SlackChannelConfig = Field(default_factory=SlackChannelConfig)
     twilio: TwilioConfig = Field(default_factory=TwilioConfig)
+    telegram_call: TelegramCallConfig = Field(default_factory=TelegramCallConfig)
 
 
 CHANNEL_SECRET_CANDIDATES: dict[str, tuple[tuple[str, str], ...]] = {

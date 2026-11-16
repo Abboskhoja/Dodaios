@@ -76,9 +76,13 @@ def test_falls_back_to_ollama_when_no_key_present_at_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ollama needs no credential (local endpoint) — it is the last-resort
-    keyless fallback when no cloud provider has a usable key."""
+    keyless fallback when no cloud provider has a usable key, and only while
+    its server answers."""
     monkeypatch.setattr(
         "dodaios.core.config.get_secret", lambda key, env_fallback=None: None
+    )
+    monkeypatch.setattr(
+        "dodaios.brain.factory._local_server_reachable", lambda *_a, **_k: True
     )
 
     ack_cfg = make_ack_config(provider="follow_brain")
@@ -167,3 +171,21 @@ def test_pipeline_voice_keeps_following_an_openai_primary(
     _build_flash_provider(jcfg, ack_cfg)
 
     assert ack_cfg.provider == "openai"
+
+
+def test_unreachable_local_server_is_not_named_as_the_flash_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No key and no local server: the flash tier is off, not pointed at a
+    server that is not there."""
+    monkeypatch.setattr(
+        "dodaios.core.config.get_secret", lambda key, env_fallback=None: None
+    )
+    monkeypatch.setattr(
+        "dodaios.brain.factory._local_server_reachable", lambda *_a, **_k: False
+    )
+
+    ack_cfg = make_ack_config(provider="follow_brain")
+    provider = _build_flash_provider(_jcfg(brain_primary="claude-api"), ack_cfg)
+
+    assert provider is None
